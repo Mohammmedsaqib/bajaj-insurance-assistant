@@ -102,7 +102,7 @@ def analyze(query, facts):
 
         try:
             response = requests.post(
-                "https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct",
+                "https://api-inference.huggingface.co/models/google/flan-t5-base",
                 headers=headers,
                 json=payload
             )
