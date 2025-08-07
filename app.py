@@ -106,10 +106,9 @@ def analyze(query, facts):
                 headers=headers,
                 json=payload
             )
+            print("🔁 Raw HTTP status:", response.status_code)
+            print("🔁 Raw response text:", response.text)
             output = response.json()
-
-            print("🔁 Raw Hugging Face output:", output)
-
             if isinstance(output, list) and "generated_text" in output[0]:
                 generated = output[0]["generated_text"]
                 json_start = generated.find("{")
