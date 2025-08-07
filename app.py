@@ -1,6 +1,7 @@
 # 📦 app.py - Streamlit UI for Insurance Query System
 
 import streamlit as st
+import requests
 import os
 import tempfile
 import json
