@@ -1,63 +1,67 @@
-# 📦 app.py - Streamlit UI for Insurance Query System
-
+import os
 import streamlit as st
 import requests
-import os
-import tempfile
 import json
-from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer, util
+from PyPDF2 import PdfReader
 
-# === Config ===
+# === Configuration ===
 USE_MOCK_MODE = False
 HUGGINGFACE_API_TOKEN = os.getenv("HUGGINGFACE_API_TOKEN")
 
+st.set_page_config(page_title="Insurance Query Assistant", layout="wide")
+st.title("🧠 Insurance Query Decision Assistant")
 
-# === Load embedding model ===
 @st.cache_resource
 def load_model():
-    return SentenceTransformer('all-MiniLM-L6-v2')
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
 model = load_model()
 
-# === Helper: Extract clauses ===
-footer_keywords = ["Bajaj Allianz", "Airport Road", "www.bajajallianz.com", "Reg. No.", "GLOBAL HEALTH CARE"]
-
-def is_boilerplate(para):
-    return any(kw.lower() in para.lower() for kw in footer_keywords)
-
-def extract_clauses(uploaded_files):
-    clauses = []
-    for file in uploaded_files:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(file.read())
-            tmp_path = tmp.name
-
-        reader = PdfReader(tmp_path)
-        for i, page in enumerate(reader.pages):
+def extract_text_from_pdf(file):
+    reader = PdfReader(file)
+    texts = []
+    for i, page in enumerate(reader.pages):
+        try:
             text = page.extract_text()
             if text:
-                for para in text.split("\n\n"):
-                    para = para.strip()
-                    if len(para) > 50 and not is_boilerplate(para):
-                        embedding = model.encode(para, convert_to_tensor=True)
-                        clauses.append({
-                            "text": para,
-                            "embedding": embedding,
-                            "source": file.name,
-                            "page": i + 1
-                        })
-        os.unlink(tmp_path)
-    return clauses
+                texts.append((i + 1, text.strip()))
+        except:
+            continue
+    return texts
 
-# === Clause retrieval ===
-def retrieve(query, clauses, top_k=3):
-    query_emb = model.encode(query, convert_to_tensor=True)
-    scored = [(c, util.pytorch_cos_sim(query_emb, c['embedding']).item()) for c in clauses]
-    top = sorted(scored, key=lambda x: x[1], reverse=True)[:top_k]
-    return [{"text": c[0]['text'], "source": c[0]['source'], "page": c[0]['page']} for c in top]
+def embed_texts(texts):
+    embeddings = model.encode([text for (_, text) in texts], convert_to_tensor=True)
+    return embeddings
 
-# === Analyze decision ===
+def search_clauses(query, pdf_data, top_k=3):
+    all_texts = []
+    metadata = []
+
+    for filename, content in pdf_data.items():
+        for page_num, text in content:
+            all_texts.append(text)
+            metadata.append((filename, page_num))
+
+    clause_embeddings = model.encode(all_texts, convert_to_tensor=True)
+    query_embedding = model.encode(query, convert_to_tensor=True)
+
+    hits = util.semantic_search(query_embedding, clause_embeddings, top_k=top_k)[0]
+
+    top_clauses = []
+    for hit in hits:
+        idx = hit['corpus_id']
+        score = hit['score']
+        source, page = metadata[idx]
+        top_clauses.append({
+            "text": all_texts[idx],
+            "score": float(score),
+            "source": source,
+            "page": page
+        })
+
+    return top_clauses
+
 def analyze(query, facts):
     if USE_MOCK_MODE:
         return {
@@ -79,8 +83,8 @@ def analyze(query, facts):
             f"Policy Clauses:\n{context}\n\n"
             f"Respond in JSON only."
         )
-        print("LLM Prompt:\n", prompt)
 
+        print("🧠 LLM Prompt:\n", prompt)
 
         headers = {
             "Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}",
@@ -102,40 +106,61 @@ def analyze(query, facts):
                 headers=headers,
                 json=payload
             )
-
             output = response.json()
+
+            print("🔁 Raw Hugging Face output:", output)
 
             if isinstance(output, list) and "generated_text" in output[0]:
                 generated = output[0]["generated_text"]
                 json_start = generated.find("{")
-                return json.loads(generated[json_start:])
+                try:
+                    return json.loads(generated[json_start:])
+                except json.JSONDecodeError as e:
+                    return {
+                        "error": f"Failed to parse LLM output: {str(e)}",
+                        "raw_output": generated
+                    }
 
-            return {"error": "Unexpected LLM output", "raw_output": output}
+            return {
+                "error": "Unexpected LLM output structure",
+                "raw_output": output
+            }
 
         except Exception as e:
-            return {"error": str(e)}
-
+            return {
+                "error": str(e)
+            }
 
 # === Streamlit UI ===
-st.set_page_config(page_title="Insurance Decision Assistant")
-st.title("🧠 Insurance Query Decision Assistant")
 
-uploaded_files = st.file_uploader("Upload policy documents (PDF)", type=["pdf"], accept_multiple_files=True)
-query = st.text_area("Enter your insurance query (e.g. '46M, knee surgery, 3-month-old policy')")
+st.sidebar.header("Upload Policy Documents")
+uploaded_files = st.sidebar.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
-if st.button("Analyze"):
-    if not uploaded_files or not query.strip():
-        st.warning("Please upload at least one PDF and enter a query.")
-    else:
-        st.info("🔍 Extracting and analyzing... please wait.")
-        clauses = extract_clauses(uploaded_files)
-        top = retrieve(query, clauses)
+query = st.text_input("Enter Insurance Query (e.g., '46M, knee surgery, Pune, 3-month policy')")
 
-        st.subheader("🔎 Matched Clauses")
-        for i, c in enumerate(top):
-            with st.expander(f"Clause {i+1} (Page {c['page']} - {c['source']})"):
-                st.write(c['text'])
+if uploaded_files and query:
+    with st.spinner("📄 Reading documents..."):
+        pdf_data = {}
+        for file in uploaded_files:
+            name = file.name
+            text = extract_text_from_pdf(file)
+            pdf_data[name] = text
 
-        st.subheader("📋 Decision")
-        result = analyze(query, top)
-        st.json(result)
+    with st.spinner("🔎 Retrieving relevant clauses..."):
+        clauses = search_clauses(query, pdf_data, top_k=3)
+
+    st.subheader("🔹 Top Matched Clauses:")
+    for c in clauses:
+        st.markdown(f"**Clause (from {c['source']} - page {c['page']}):**")
+        st.code(c["text"][:800] + ("..." if len(c["text"]) > 800 else ""), language="markdown")
+
+    with st.spinner("🧠 Analyzing with LLM..."):
+        result = analyze(query, clauses)
+
+    st.subheader("✅ Decision Result")
+    st.json(result)
+
+elif not uploaded_files:
+    st.info("⬅️ Please upload one or more insurance policy PDFs.")
+elif not query:
+    st.info("✏️ Enter a natural language insurance query.")
