@@ -8,8 +8,9 @@ from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer, util
 
 # === Config ===
-USE_MOCK_MODE = True
-HUGGINGFACE_API_TOKEN = "hf_XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+USE_MOCK_MODE = False
+HUGGINGFACE_API_TOKEN = os.getenv("HUGGINGFACE_API_TOKEN")
+
 
 # === Load embedding model ===
 @st.cache_resource
@@ -62,29 +63,55 @@ def analyze(query, facts):
             "decision": "rejected",
             "amount": 0,
             "justification": "Knee surgery not covered under 3-month-old policy.",
-            "referenced_clauses": [{"source": f['source'], "page": f['page']} for f in facts]
+            "referenced_clauses": [{ "source": f["source"], "page": f["page"] } for f in facts]
         }
     else:
-        context = "\n---\n".join([f"From {f['source']} (Page {f['page']}): {f['text'][:500]}" for f in facts])
+        context = "\n---\n".join([
+            f"From {f['source']} (Page {f['page']}):\n{f['text'][:500]}"
+            for f in facts
+        ])
+
         prompt = (
-            f"You are an insurance policy assistant. Analyze the claim and return a JSON object with fields: decision, amount, justification, referenced_clauses.\n"
-            f"Query: \"{query}\"\n\nPolicy Clauses:\n{context}\n\nRespond in JSON only."
+            f"You are an insurance policy assistant. Analyze the claim and return a JSON object with fields: "
+            f"decision, amount, justification, and referenced_clauses (with source and page).\n\n"
+            f"Query: \"{query}\"\n\n"
+            f"Policy Clauses:\n{context}\n\n"
+            f"Respond in JSON only."
         )
 
-        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}", "Content-Type": "application/json"}
-        payload = {"inputs": prompt, "parameters": {"max_new_tokens": 512, "temperature": 0.3, "do_sample": False}}
+        headers = {
+            "Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 512,
+                "temperature": 0.3,
+                "do_sample": False
+            }
+        }
 
         try:
             response = requests.post(
                 "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1",
-                headers=headers, json=payload)
+                headers=headers,
+                json=payload
+            )
+
             output = response.json()
+
             if isinstance(output, list) and "generated_text" in output[0]:
-                json_start = output[0]['generated_text'].find('{')
-                return json.loads(output[0]['generated_text'][json_start:])
-            return {"error": "Unexpected output", "raw_output": output}
+                generated = output[0]["generated_text"]
+                json_start = generated.find("{")
+                return json.loads(generated[json_start:])
+
+            return {"error": "Unexpected LLM output", "raw_output": output}
+
         except Exception as e:
             return {"error": str(e)}
+
 
 # === Streamlit UI ===
 st.set_page_config(page_title="Insurance Decision Assistant")
