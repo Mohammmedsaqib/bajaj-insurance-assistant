@@ -78,6 +78,8 @@ def analyze(query, facts):
             f"Policy Clauses:\n{context}\n\n"
             f"Respond in JSON only."
         )
+        print("LLM Prompt:\n", prompt)
+
 
         headers = {
             "Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}",
